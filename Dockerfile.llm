@@ -1,0 +1,16 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install dependencies
+COPY llm_requirements.txt .
+RUN pip install --no-cache-dir -r llm_requirements.txt
+
+# Copy server code
+COPY llm_server.py .
+
+# Expose port (Render uses $PORT env var)
+EXPOSE 10000
+
+# Start the server on the port Render assigns
+CMD ["sh", "-c", "uvicorn llm_server:app --host 0.0.0.0 --port ${PORT:-10000}"]

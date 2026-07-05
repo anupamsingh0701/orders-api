@@ -1,7 +1,9 @@
 services:
   - type: web
-    name: orders-api
-    env: docker
+    name: llm-server
+    runtime: docker
+    dockerfilePath: ./Dockerfile.llm
     plan: free
-    healthCheckPath: /
-    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: "10000"
