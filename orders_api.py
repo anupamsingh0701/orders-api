@@ -19,11 +19,11 @@ app = FastAPI(title="Orders API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origin_regex=r"https?://.*",
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["Retry-After"],
+    expose_headers=["Retry-After", "Idempotency-Key", "X-Client-Id"],
 )
 
 _idempotency_lock = threading.Lock()
@@ -85,10 +85,19 @@ async def apply_rate_limit(request: Request, call_next):
     client_id = request.headers.get("X-Client-Id", "").strip() or "anonymous"
     retry_after = _check_rate_limit(client_id)
     if retry_after is not None:
+        origin = request.headers.get("origin", "*")
+        cors_headers = {
+            "Retry-After": str(retry_after),
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Methods": "*",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Expose-Headers": "Retry-After, Idempotency-Key, X-Client-Id",
+            "Access-Control-Allow-Credentials": "true",
+        }
         return JSONResponse(
             status_code=429,
             content={"detail": "Too Many Requests"},
-            headers={"Retry-After": str(retry_after)},
+            headers=cors_headers,
         )
 
     return await call_next(request)
