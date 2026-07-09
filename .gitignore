@@ -13,3 +13,4 @@ build/
 .DS_Store
 catboost_info/
 *.ipynb_checkpoints/
+invoice-intelligence-api/
