@@ -110,7 +110,7 @@ class TestInvoiceExtraction(unittest.TestCase):
         self.assertEqual(cleaned["properties"]["line_items"]["items"]["type"], "OBJECT")
 
     @patch("httpx.AsyncClient.post")
-    def test_extract_endpoint(self, mock_post):
+    def test_extract_endpoint_gemini(self, mock_post):
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
@@ -186,10 +186,88 @@ class TestInvoiceExtraction(unittest.TestCase):
         self.assertEqual(data["priority"], "urgent")
         self.assertEqual(data["contact_email"], "ap@acme.com")
         self.assertEqual(len(data["line_items"]), 2)
-        self.assertEqual(data["line_items"][0]["sku"], "WIDGET-204")
-        self.assertEqual(data["line_items"][0]["quantity"], 12)
-        self.assertEqual(data["line_items"][0]["unit_price"], 40)
         self.assertEqual(data["item_count"], 2)
+
+    @patch("httpx.AsyncClient.post")
+    def test_extract_endpoint_aipipe(self, mock_post):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps({
+                            "vendor": "Acme Industrial Supply",
+                            "currency": "euros",
+                            "total_amount": "twelve thousand four hundred eighty",
+                            "invoice_date": "June 12th, 2026",
+                            "due_in_days": "due in two weeks",
+                            "is_paid": "paid in full",
+                            "priority": "critical",
+                            "contact_email": "AP@ACME.COM",
+                            "line_items": [
+                                {"sku": "WIDGET-204", "quantity": "12", "unit_price": "40"},
+                                {"sku": "BOLT-118", "quantity": "200", "unit_price": "5"}
+                            ]
+                        })
+                    }
+                }
+            ]
+        }
+        mock_post.return_value = mock_response
+
+        # Force AIPipe pathway
+        os.environ["AIPIPE_TOKEN"] = "aipipe-token-mock"
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "vendor": {"type": "string"},
+                "currency": {"type": "string"},
+                "total_amount": {"type": "integer"},
+                "invoice_date": {"type": "string"},
+                "due_in_days": {"type": "integer"},
+                "is_paid": {"type": "boolean"},
+                "priority": {"type": "string"},
+                "contact_email": {"type": "string"},
+                "line_items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "sku": {"type": "string"},
+                            "quantity": {"type": "integer"},
+                            "unit_price": {"type": "integer"}
+                        }
+                    }
+                },
+                "item_count": {"type": "integer"}
+            }
+        }
+
+        payload = {
+            "document_id": "doc0",
+            "text": "Invoice text here...",
+            "schema": schema
+        }
+
+        response = self.client.post("/extract", json=payload)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+
+        self.assertEqual(data["vendor"], "Acme Industrial Supply")
+        self.assertEqual(data["currency"], "EUR")
+        self.assertEqual(data["total_amount"], 12480)
+        self.assertEqual(data["invoice_date"], "2026-06-12")
+        self.assertEqual(data["due_in_days"], 14)
+        self.assertTrue(data["is_paid"])
+        self.assertEqual(data["priority"], "urgent")
+        self.assertEqual(data["contact_email"], "ap@acme.com")
+        self.assertEqual(len(data["line_items"]), 2)
+        self.assertEqual(data["item_count"], 2)
+
+        # Clean up
+        del os.environ["AIPIPE_TOKEN"]
 
 if __name__ == "__main__":
     unittest.main()

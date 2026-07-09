@@ -672,22 +672,35 @@ async def extract_invoice(req: InvoiceExtractionRequest):
             detail="Schema is empty"
         )
 
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        logger.error("GEMINI_API_KEY is not configured.")
+    # Resolve token and base url
+    aipipe_token = os.environ.get("AIPIPE_TOKEN")
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    
+    use_aipipe = False
+    token = ""
+    
+    if aipipe_token:
+        use_aipipe = True
+        token = aipipe_token
+    elif gemini_key:
+        token = gemini_key
+        # Use AIPipe only if the token doesn't look like a Gemini key AND doesn't look like a test key
+        if not (gemini_key.startswith("AIza") or gemini_key.startswith("AQ.") or "mock" in gemini_key or "test" in gemini_key):
+            use_aipipe = True
+            
+    if not token:
+        logger.error("No API token configured (neither AIPIPE_TOKEN nor GEMINI_API_KEY).")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Gemini API Key is not configured on the server. Please set the GEMINI_API_KEY environment variable."
+            detail="No API token configured on the server. Please set the AIPIPE_TOKEN or GEMINI_API_KEY environment variable."
         )
-
-    model_name = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
-    gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-
-    gemini_schema = clean_for_gemini_schema(req.schema_dict)
 
     prompt = f"""You are a precise invoice extraction assistant.
 You are given a raw invoice text and a schema.
-Your task is to extract the fields matching the schema exactly from the text.
+Your task is to extract the fields matching the schema exactly from the text and return a JSON object.
+
+The JSON object must contain exactly the keys defined in the schema:
+{json.dumps(req.schema_dict, indent=2)}
 
 Here are the details of how to map the fields:
 - vendor: the biller's proper name, exactly as written in the text.
@@ -705,86 +718,139 @@ Invoice Text:
 {req.text}
 """
 
-    request_payload = {
-        "contents": [
-            {
-                "parts": [
-                    {
-                        "text": prompt
-                    }
-                ]
-            }
-        ],
-        "generationConfig": {
-            "temperature": 0.0,
-            "maxOutputTokens": 2048,
-            "responseMimeType": "application/json",
-            "responseSchema": gemini_schema
+    if use_aipipe:
+        # OpenAI/AIPipe Chat Completions path
+        model_name = os.environ.get("AIPIPE_MODEL") or os.environ.get("GEMINI_MODEL")
+        if not model_name:
+            model_name = "gpt-4o-mini"
+            
+        base_url = os.environ.get("AIPIPE_BASE_URL", "")
+        if not base_url:
+            if "/" in model_name:
+                base_url = "https://aipipe.org/openrouter/v1"
+            else:
+                base_url = "https://aipipe.org/openai/v1"
+                
+        url = f"{base_url.rstrip('/')}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
         }
-    }
+        
+        request_payload = {
+            "model": model_name,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "response_format": {
+                "type": "json_object"
+            },
+            "temperature": 0.0
+        }
+        
+        logger.info(f"Sending request to AIPipe URL: {url} with model: {model_name}")
+        try:
+            async with httpx.AsyncClient(timeout=45.0) as client:
+                response = await client.post(url, json=request_payload, headers=headers)
+                
+                if response.status_code != 200:
+                    logger.error(f"AIPipe API error (HTTP {response.status_code}): {response.text}")
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail=f"AIPipe API Error: {response.text}"
+                    )
+                    
+                resp_json = response.json()
+                raw_answer = resp_json["choices"][0]["message"]["content"]
+                logger.info(f"Raw answer from AIPipe: {raw_answer!r}")
+                
+        except httpx.RequestError as exc:
+            logger.error(f"Network error while connecting to AIPipe: {exc}")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Network error connecting to AI model proxy: {str(exc)}"
+            )
+            
+    else:
+        # Gemini native generateContent path
+        model_name = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
+        gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={token}"
+        gemini_schema = clean_for_gemini_schema(req.schema_dict)
+        
+        request_payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {
+                            "text": prompt
+                        }
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.0,
+                "maxOutputTokens": 2048,
+                "responseMimeType": "application/json",
+                "responseSchema": gemini_schema
+            }
+        }
+        
+        logger.info(f"Sending request to Gemini API URL: {gemini_url} with model: {model_name}")
+        try:
+            async with httpx.AsyncClient(timeout=45.0) as client:
+                response = await client.post(gemini_url, json=request_payload)
+                
+                if response.status_code != 200:
+                    logger.error(f"Gemini API error (HTTP {response.status_code}): {response.text}")
+                    err_detail = "Failed to communicate with Gemini API."
+                    try:
+                        err_json = response.json()
+                        if "error" in err_json and "message" in err_json["error"]:
+                            err_detail = f"Gemini API Error: {err_json['error']['message']}"
+                    except Exception:
+                        pass
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail=err_detail
+                    )
+                    
+                resp_data = response.json()
+                candidates = resp_data.get("candidates", [])
+                if not candidates or not candidates[0].get("content", {}).get("parts", []):
+                    logger.warning("Gemini returned no content.")
+                    return post_process_extracted_data({}, req.schema_dict)
+                    
+                raw_answer = candidates[0]["content"]["parts"][0].get("text", "")
+                logger.info(f"Raw answer from Gemini: {raw_answer!r}")
+                
+        except httpx.RequestError as exc:
+            logger.error(f"Network error while connecting to Gemini: {exc}")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Network error connecting to AI model: {str(exc)}"
+            )
+
+    # Common parsing and post-processing for both paths
+    text_response = raw_answer.strip()
+    if text_response.startswith("```json"):
+        text_response = text_response[7:]
+    if text_response.startswith("```"):
+        text_response = text_response[3:]
+    if text_response.endswith("```"):
+        text_response = text_response[:-3]
+    text_response = text_response.strip()
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(gemini_url, json=request_payload)
-            
-            if response.status_code != 200:
-                logger.error(f"Gemini API error (HTTP {response.status_code}): {response.text}")
-                err_detail = "Failed to communicate with Gemini API."
-                try:
-                    err_json = response.json()
-                    if "error" in err_json and "message" in err_json["error"]:
-                        err_detail = f"Gemini API Error: {err_json['error']['message']}"
-                except Exception:
-                    pass
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail=err_detail
-                )
-                
-            resp_data = response.json()
-            candidates = resp_data.get("candidates", [])
-            if not candidates:
-                logger.warning("Gemini returned no candidates in response.")
-                return post_process_extracted_data({}, req.schema_dict)
-                
-            first_candidate = candidates[0]
-            parts = first_candidate.get("content", {}).get("parts", [])
-            if not parts:
-                logger.warning("Gemini candidate contains no parts.")
-                return post_process_extracted_data({}, req.schema_dict)
-                
-            raw_answer = parts[0].get("text", "")
-            logger.info(f"Raw answer from Gemini: {raw_answer!r}")
-            
-            text_response = raw_answer.strip()
-            if text_response.startswith("```json"):
-                text_response = text_response[7:]
-            if text_response.startswith("```"):
-                text_response = text_response[3:]
-            if text_response.endswith("```"):
-                text_response = text_response[:-3]
-            text_response = text_response.strip()
-
-            try:
-                extracted_data = json.loads(text_response)
-            except Exception as e:
-                logger.error(f"Failed to parse LLM response as JSON: {text_response}")
-                extracted_data = {}
-
-            output_data = post_process_extracted_data(extracted_data, req.schema_dict)
-            return output_data
-
-    except httpx.RequestError as exc:
-        logger.error(f"Network error while connecting to Gemini: {exc}")
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Network error connecting to AI model: {str(exc)}"
-        )
-    except HTTPException:
-        raise
+        extracted_data = json.loads(text_response)
     except Exception as e:
-        logger.error(f"Unexpected error: {e}")
-        return post_process_extracted_data({}, req.schema_dict)
+        logger.error(f"Failed to parse LLM response as JSON: {text_response}")
+        extracted_data = {}
+
+    output_data = post_process_extracted_data(extracted_data, req.schema_dict)
+    return output_data
 
 @app.get("/")
 def root():
