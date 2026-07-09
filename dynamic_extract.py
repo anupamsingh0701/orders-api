@@ -714,6 +714,12 @@ Here are the details of how to map the fields:
 - line_items: array of items containing sku, quantity (integer), unit_price (integer) in the order they appear.
 - item_count: number of line items (integer).
 
+CRITICAL sanity checks for line_items:
+For each line item:
+1. "quantity" must represent the COUNT or NUMBER of items purchased (e.g., 12, 1000).
+2. "unit_price" must represent the COST PER SINGLE UNIT of the item (e.g., $12 each, 12 per unit). Do NOT use the total price/cost of the line item (which is quantity * unit_price).
+3. Do NOT swap quantity and unit_price. Look closely at symbols like "@", "each", "qty", "price", "unit cost", "rate" to distinguish which is which. For example, if the invoice says "1000 WIDGET-204 at 12 each", then quantity is 1000 and unit_price is 12 (not 1000).
+
 Invoice Text:
 {req.text}
 """
