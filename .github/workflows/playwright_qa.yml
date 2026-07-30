@@ -1,0 +1,30 @@
+name: Automated QA Playwright Scraper
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  scrape-and-sum:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: |
+          npm install playwright
+
+      - name: Install Playwright Browsers
+        run: |
+          npx playwright install --with-deps chromium
+
+      - name: Scrape tables and calculate total sum - 24f2008630@ds.study.iitm.ac.in
+        run: |
+          node scrape_playwright.js
