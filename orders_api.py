@@ -84,7 +84,7 @@ async def apply_rate_limit(request: Request, call_next):
     if request.method == "OPTIONS":
         return await call_next(request)
 
-    if request.url.path == "/verify":
+    if request.url.path in ("/verify", "/action-firewall"):
         return await call_next(request)
 
     client_id = request.headers.get("X-Client-Id", "").strip() or "anonymous"
@@ -112,10 +112,28 @@ async def apply_rate_limit(request: Request, call_next):
 async def root() -> Dict[str, Any]:
     return {
         "service": "orders-api",
-        "patterns": ["idempotent-post", "cursor-pagination", "per-client-rate-limit"],
+        "patterns": ["idempotent-post", "cursor-pagination", "per-client-rate-limit", "action-firewall"],
         "total_orders": TOTAL_ORDERS,
         "rate_limit": f"{RATE_LIMIT}/10s",
+        "tenant": "tenant-2dtengp",
+        "emailDomain": "notify-n3gfzba.example",
     }
+
+
+@app.post("/action-firewall")
+async def action_firewall_route(request: Request) -> JSONResponse:
+    from action_firewall import evaluate_action_firewall
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse(
+            status_code=200,
+            content={"decision": "block", "reason": "INVALID_SCHEMA"},
+        )
+
+    result = evaluate_action_firewall(payload)
+    return JSONResponse(status_code=200, content=result)
+
 
 
 @app.post("/orders", status_code=201)
